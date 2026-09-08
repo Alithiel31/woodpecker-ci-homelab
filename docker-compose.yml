@@ -1,0 +1,88 @@
+networks:
+  traefik-net:
+    external: true
+  ci-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${CI_NET_SUBNET}
+
+volumes:
+  gitea-data:
+  woodpecker-server-data:
+
+services:
+  gitea:
+    image: gitea/gitea:1.22
+    container_name: gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=host.docker.internal:5432
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=gitea_app
+      - GITEA__database__PASSWD=${GITEA_DB_PASS}
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN}
+      - GITEA__server__ROOT_URL=http://${GITEA_DOMAIN}:8000/
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__security__INSTALL_LOCK=true
+    volumes:
+      - gitea-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - ci-net
+      - traefik-net
+    extra_hosts:
+      - "host.docker.internal:${CI_NET_GATEWAY}"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gitea.entrypoints=web"
+      - "traefik.http.routers.gitea.rule=Host(`${GITEA_DOMAIN}`)"
+      - "traefik.http.services.gitea.loadbalancer.server.port=3000"
+
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:v3
+    container_name: woodpecker-server
+    environment:
+      - WOODPECKER_OPEN=true
+      - WOODPECKER_ADMIN=${WOODPECKER_ADMIN_USER}
+      - WOODPECKER_HOST=http://${WOODPECKER_DOMAIN}:8000
+      - WOODPECKER_GITEA=true
+      - WOODPECKER_GITEA_URL=http://${GITEA_DOMAIN}:8000
+      - WOODPECKER_GITEA_CLIENT=${WOODPECKER_GITEA_CLIENT}
+      - WOODPECKER_GITEA_SECRET=${WOODPECKER_GITEA_SECRET}
+      - WOODPECKER_GRPC_SECRET=${WOODPECKER_AGENT_SECRET}
+      - WOODPECKER_DATABASE_DRIVER=postgres
+      - WOODPECKER_DATABASE_DATASOURCE=postgres://woodpecker_app:${WOODPECKER_DB_PASS}@host.docker.internal:5432/woodpecker?sslmode=disable
+    volumes:
+      - woodpecker-server-data:/var/lib/woodpecker
+    networks:
+      - ci-net
+      - traefik-net
+    extra_hosts:
+      - "host.docker.internal:${CI_NET_GATEWAY}"
+      - "${GITEA_DOMAIN}:${CI_NET_GATEWAY}"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.woodpecker.entrypoints=web"
+      - "traefik.http.routers.woodpecker.rule=Host(`${WOODPECKER_DOMAIN}`)"
+      - "traefik.http.services.woodpecker.loadbalancer.server.port=8000"
+
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:v3
+    container_name: woodpecker-agent
+    command: agent
+    environment:
+      - WOODPECKER_SERVER=woodpecker-server:9000
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - ci-net
+    restart: unless-stopped
+    depends_on:
+      - woodpecker-server

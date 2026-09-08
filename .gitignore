@@ -1,0 +1,8 @@
+.env
+
+# OS / editeur
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
