@@ -1,4 +1,5 @@
 .env
+.infisical-identity.env
 
 # OS / editeur
 .DS_Store
