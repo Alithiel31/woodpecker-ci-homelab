@@ -1,199 +1,231 @@
-# Gitea + Woodpecker CI — Homelab
+# Gitea + Woodpecker CI — self-hosted CI/CD (homelab)
 
-Stack CI/CD auto-hébergée sur un homelab (Raspberry Pi 5), sans aucune exposition publique. Accès exclusivement via un VPN mesh (Tailscale ou équivalent) + résolution DNS locale côté client.
+[Version française](README.fr.md)
+
+Self-hosted CI/CD stack on a homelab (Raspberry Pi 5), with no public exposure at all. Access is only through a mesh VPN (Tailscale or equivalent) plus local DNS resolution on the client. Secrets are managed in [Infisical](https://github.com/Alithiel31/infisical-homelab) and injected at deploy time.
 
 ## Architecture
 
 ```
-Navigateur (client sur le VPN mesh)
-        │  résout gitea.homelab.internal / woodpecker.homelab.internal
-        │  via une entrée dans le fichier hosts local → IP VPN du homelab
+Browser (client on the mesh VPN)
+        │  resolves gitea.homelab.internal / woodpecker.homelab.internal
+        │  through a local hosts entry → homelab VPN IP
         ▼
-   Traefik (reverse proxy déjà en place, entrypoint "web", port host 8000)
-        │  routage par Host() header, réseau traefik-net
+   Traefik (reverse proxy already in place, entrypoint "web", host port 8000)
+        │  routing by Host() header, traefik-net network
         ▼
    ┌─────────────┐         ┌────────────────────┐
    │    Gitea    │◄───────►│  Woodpecker Server  │
-   │ (forge git) │  OAuth2 │  (orchestrateur CI) │
+   │ (git forge) │  OAuth2 │  (CI orchestrator)  │
    └──────┬──────┘         └──────────┬──────────┘
           │                           │ gRPC (port 9000)
-          │ Postgres natif            ▼
+          │ native Postgres           ▼
           │ (172.16.0.1:5432)  ┌──────────────────┐
           └───────────────────►│ Woodpecker Agent  │
-                                │ (exécute les      │
-                                │  pipelines Docker)│
+                                │ (runs the Docker  │
+                                │  pipelines)       │
                                 └──────────────────┘
 ```
 
-- **Gitea** : forge Git auto-hébergée, remplace GitHub pour garder toute la chaîne (webhooks inclus) strictement interne.
-- **Woodpecker Server** : reçoit les webhooks de Gitea, orchestre les pipelines, sert l'interface web.
-- **Woodpecker Agent** : exécute réellement les pipelines dans des conteneurs Docker (via le socket Docker de l'hôte).
-- **Traefik** : reverse proxy déjà en place sur le homelab, routage par domaine (labels Docker, `exposedbydefault=false`).
-- **Postgres** : instance native mutualisée du homelab (pas de conteneur dédié), une base par service (`gitea`, `woodpecker`).
+- **Gitea**: self-hosted Git forge, replaces GitHub so the whole chain (webhooks included) stays strictly internal.
+- **Woodpecker Server**: receives Gitea webhooks, orchestrates pipelines, serves the web UI.
+- **Woodpecker Agent**: actually runs the pipelines in Docker containers (through the host's Docker socket).
+- **Traefik** ([traefik-homelab](https://github.com/Alithiel31/traefik-homelab)): reverse proxy already running on the homelab, routing by domain (Docker labels, `exposedbydefault=false`).
+- **Postgres**: shared native instance of the homelab (no dedicated container), one database per service (`gitea`, `woodpecker`).
+- **Infisical** ([infisical-homelab](https://github.com/Alithiel31/infisical-homelab)): provides the secrets (DB passwords, gRPC secret, OAuth2 credentials) injected by `deploy.sh`; no secret lives in `.env` anymore.
 
-Réseau Docker dédié `ci-net` (`172.16.0.0/24` par défaut, configurable via `.env`), séparé de `traefik-net`.
+Dedicated Docker network `ci-net` (`172.16.0.0/24` by default, configurable via `.env`), separate from `traefik-net`.
 
-## Prérequis
+## Prerequisites
 
-Avant de lancer cette stack, le homelab doit déjà avoir :
+Before starting this stack, the homelab must already have:
 
-- **Docker + Docker Compose** installés.
-- **Traefik** déjà déployé et fonctionnel, avec :
-  - un réseau Docker externe nommé `traefik-net` (`docker network create traefik-net` si besoin) ;
-  - le provider Docker activé avec `exposedbydefault=false` (routage par labels uniquement) ;
-  - un entrypoint `web` écoutant sur le port host `8000` (ou adapter les URLs de ce README/du compose à ton port réel).
-- **Postgres** (natif sur l'hôte, pas en conteneur) accessible depuis les conteneurs Docker, avec `listen_addresses` incluant l'IP de la passerelle du futur réseau `ci-net`.
-- **ufw** (ou équivalent) actif avec refus par défaut en entrée — les règles d'autorisation précises sont données plus bas.
-- Un **VPN mesh** (Tailscale ou équivalent) donnant accès au homelab depuis les postes clients.
-- **Gitea et Woodpecker n'ont pas besoin d'être installés au préalable** — cette stack les déploie tous les deux.
+- **Docker + Docker Compose** installed.
+- **Traefik** deployed and working, with:
+  - an external Docker network named `traefik-net` (`docker network create traefik-net` if needed);
+  - the Docker provider enabled with `exposedbydefault=false` (label-only routing);
+  - an entrypoint `web` listening on host port `8000` (or adapt the URLs in this README/the compose to your actual port).
+- **Infisical** deployed and reachable, with a "Shared Keys" project (`prod` environment) and the [Infisical CLI](https://infisical.com/docs/cli/overview) installed on the host.
+- **Postgres** (native on the host, not a container) reachable from Docker containers, with `listen_addresses` including the gateway IP of the future `ci-net` network.
+- **ufw** (or equivalent) enabled with default-deny inbound — the exact allow rules are given below.
+- A **mesh VPN** (Tailscale or equivalent) giving client machines access to the homelab.
+- **Gitea and Woodpecker don't need to be installed beforehand** — this stack deploys both.
 
 ## Installation from scratch
 
-### 1. Choisir le sous-réseau Docker dédié
+### 1. Choose the dedicated Docker subnet
 
-Vérifie qu'aucun réseau Docker existant sur l'hôte n'entre en conflit avec le futur `ci-net` :
+Check that no existing Docker network on the host conflicts with the future `ci-net`:
 ```bash
 docker network ls -q | xargs -I{} docker network inspect {} --format '{{.Name}}: {{range .IPAM.Config}}{{.Subnet}}{{end}}'
 ```
-Ajuste `CI_NET_SUBNET`/`CI_NET_GATEWAY` dans `.env` si `172.16.0.0/24` est déjà pris.
+Adjust `CI_NET_SUBNET`/`CI_NET_GATEWAY` in `.env` if `172.16.0.0/24` is already taken.
 
-### 2. Créer les bases et utilisateurs Postgres
+### 2. Create the Postgres databases and users
 
-Sur l'hôte, en tant qu'utilisateur Postgres admin :
+On the host, as the Postgres admin user:
 ```sql
-CREATE USER gitea_app WITH PASSWORD 'un-mot-de-passe-fort';
+CREATE USER gitea_app WITH PASSWORD 'a-strong-password';
 CREATE DATABASE gitea OWNER gitea_app;
 
-CREATE USER woodpecker_app WITH PASSWORD 'un-autre-mot-de-passe-fort';
+CREATE USER woodpecker_app WITH PASSWORD 'another-strong-password';
 CREATE DATABASE woodpecker OWNER woodpecker_app;
 ```
-⚠️ Pour `WOODPECKER_DB_PASS`, génère le mot de passe avec `openssl rand -hex 24` (uniquement hexadécimal) plutôt que `base64` : Woodpecker l'utilise dans une URL DSN (`postgres://user:pass@host/db`) et un caractère spécial comme `/` casse le parsing.
+⚠️ For `WOODPECKER_DB_PASS`, generate the password with `openssl rand -hex 24` (hexadecimal only) rather than `base64`: Woodpecker uses it in a DSN URL (`postgres://user:pass@host/db`) and a special character such as `/` breaks the parsing.
 
-Ajoute la règle d'accès dans `pg_hba.conf` (adapter le chemin selon la version Postgres) :
+Add the access rule to `pg_hba.conf` (adjust the path to your Postgres version):
 ```
 host    gitea        gitea_app        <CI_NET_SUBNET>    scram-sha-256
 host    woodpecker   woodpecker_app   <CI_NET_SUBNET>    scram-sha-256
 ```
-Puis recharge Postgres (`sudo systemctl reload postgresql` ou équivalent).
+Then reload Postgres (`sudo systemctl reload postgresql` or equivalent).
 
-### 3. Ouvrir les ports nécessaires dans le pare-feu
+### 3. Open the required firewall ports
 
-Le réseau `ci-net` doit pouvoir atteindre Postgres (5432) et Traefik (8000) sur l'hôte :
+The `ci-net` network must be able to reach Postgres (5432) and Traefik (8000) on the host:
 ```bash
-sudo ufw allow from <CI_NET_SUBNET> to any port 5432 proto tcp comment "gitea+woodpecker -> postgres mutualise"
+sudo ufw allow from <CI_NET_SUBNET> to any port 5432 proto tcp comment "gitea+woodpecker -> shared postgres"
 sudo ufw allow from <CI_NET_SUBNET> to any port 8000 proto tcp comment "gitea+woodpecker -> traefik"
 ```
-Sans ces règles : timeout silencieux (pas de rejet explicite) lors du démarrage — voir la section Dépannage plus bas.
+Without these rules: silent timeout (no explicit rejection) at startup — see the Troubleshooting section below.
 
-### 4. Configurer le DNS interne côté client
+### 4. Configure internal DNS on the client side
 
-Ajoute au fichier hosts de chaque poste client qui doit y accéder (`C:\Windows\System32\drivers\etc\hosts` sous Windows, `/etc/hosts` sous Linux/macOS) :
+Add to the hosts file of every client machine that needs access (`C:\Windows\System32\drivers\etc\hosts` on Windows, `/etc/hosts` on Linux/macOS):
 ```
-<IP_VPN_DU_HOMELAB>  gitea.homelab.internal
-<IP_VPN_DU_HOMELAB>  woodpecker.homelab.internal
+<HOMELAB_VPN_IP>  gitea.homelab.internal
+<HOMELAB_VPN_IP>  woodpecker.homelab.internal
 ```
-(remplace par les domaines réellement choisis dans `.env` si différents)
+(replace with the domains actually chosen in `.env` if different)
 
-### 5. Préparer le `.env`
+### 5. Prepare configuration and secrets
 
+**Non-secret settings** (`.env`):
 ```bash
 cp .env.example .env
 ```
-Remplis toutes les valeurs (voir la table [Variables d'environnement](#variables-denvironnement-voir-envexample)). Pour `WOODPECKER_GITEA_CLIENT`/`WOODPECKER_GITEA_SECRET`, laisse vide pour l'instant — l'app OAuth2 Gitea n'existe pas encore (étape 7).
+Fill in the values (see [Environment variables](#environment-variables)).
 
-### 6. Démarrer Gitea seul, puis créer le compte admin
+**Secrets** (Infisical, "Shared Keys" project, `prod` environment): create these entries. For `WOODPECKER_GITEA_CLIENT`/`WOODPECKER_GITEA_SECRET`, the Gitea OAuth2 app doesn't exist yet: they will be added in step 7.
+- `GITEA_DB_PASS`
+- `WOODPECKER_DB_PASS`
+- `WOODPECKER_AGENT_SECRET` (e.g. `openssl rand -hex 32`)
 
+**`deploy.sh` access to Infisical**: create a Machine Identity `woodpecker-ci-deploy` (Universal Auth, read access to the project), then:
 ```bash
-docker compose up -d gitea
+cp .infisical-identity.env.example .infisical-identity.env
 ```
-Comme `GITEA__security__INSTALL_LOCK=true` est déjà positionné, l'installeur web est court-circuité. Crée le compte admin directement en CLI :
+and fill in the Client ID, Client Secret and `INFISICAL_API_URL`. This file is never committed.
+
+### 6. Start Gitea alone, then create the admin account
+
+`deploy.sh` starts the whole stack and takes no argument. To start Gitea only, reuse its command `infisical run … -- docker compose up -d gitea` (same options as in `deploy.sh`):
+```bash
+docker compose up -d gitea   # through infisical run, as in deploy.sh
+```
+Since `GITEA__security__INSTALL_LOCK=true` is already set, the web installer is bypassed. Create the admin account directly from the CLI:
 ```bash
 docker exec -u git gitea gitea admin user create --username <user> --password "<pass>" --email <email> --admin
 ```
-(`-u git` obligatoire — le process Gitea tourne en `git`, pas en `root`.)
+(`-u git` is mandatory — the Gitea process runs as `git`, not `root`.)
 
-Connecte-toi ensuite sur `http://<GITEA_DOMAIN>:8000/` avec ce compte.
+Then log in at `http://<GITEA_DOMAIN>:8000/` with this account.
 
-### 7. Créer l'application OAuth2 dans Gitea pour Woodpecker
+### 7. Create the OAuth2 application in Gitea for Woodpecker
 
-Dans Gitea : **Paramètres du site → Applications → Applications OAuth2 gérées → Créer une application OAuth2**.
-- Nom : `Woodpecker CI` (ou autre)
-- URL de redirection : `http://<WOODPECKER_DOMAIN>:8000/authorize`
+In Gitea: **Site Administration → Applications → Manage OAuth2 Applications → Create OAuth2 Application**.
+- Name: `Woodpecker CI` (or anything)
+- Redirect URI: `http://<WOODPECKER_DOMAIN>:8000/authorize`
 
-Copie le **Client ID** et le **Client Secret** générés dans `WOODPECKER_GITEA_CLIENT`/`WOODPECKER_GITEA_SECRET` dans `.env`.
+Copy the generated **Client ID** and **Client Secret** into Infisical ("Shared Keys" project, `prod` environment) as `WOODPECKER_GITEA_CLIENT` / `WOODPECKER_GITEA_SECRET`.
 
-### 8. Démarrer le reste de la stack
+### 8. Start the rest of the stack
 
 ```bash
-docker compose up -d
+./deploy.sh
 ```
-Vérifie les logs :
+The script authenticates to Infisical with the Machine Identity, then runs `docker compose up -d` with the secrets injected. Check the logs:
 ```bash
 docker logs woodpecker-server --tail 30
 docker logs woodpecker-agent --tail 30
 ```
-Le serveur ne doit **pas** afficher `WOODPECKER_GRPC_SECRET is not set` (sinon `WOODPECKER_AGENT_SECRET` n'a pas été repris correctement dans `.env`). L'agent doit afficher `polling new workflow` sans erreur `fatal`.
+The server must **not** print `WOODPECKER_GRPC_SECRET is not set` (otherwise `WOODPECKER_AGENT_SECRET` wasn't picked up correctly). The agent must print `polling new workflow` with no `fatal` error.
 
-### 9. Vérifier que l'agent est bien connecté
+### 9. Check that the agent is connected
 
-Connecte-toi sur `http://<WOODPECKER_DOMAIN>:8000/` avec "Login with Gitea", puis va dans **Admin → Agents** (icône engrenage, visible seulement si ton compte Gitea est listé dans `WOODPECKER_ADMIN_USER`). Un agent avec un "last contact" récent confirme que tout fonctionne.
+Log in at `http://<WOODPECKER_DOMAIN>:8000/` with "Login with Gitea", then go to **Admin → Agents** (gear icon, only visible if your Gitea account is listed in `WOODPECKER_ADMIN_USER`). An agent with a recent "last contact" confirms everything works.
 
-## Accès
+## Access
 
 | Service | URL | Notes |
 |---|---|---|
-| Gitea | `http://gitea.homelab.internal:8000/` | admin : `<votre-username>` |
-| Woodpecker | `http://woodpecker.homelab.internal:8000/` | login via "Login with Gitea" (OAuth2) |
+| Gitea | `http://gitea.homelab.internal:8000/` | admin: `<your-username>` |
+| Woodpecker | `http://woodpecker.homelab.internal:8000/` | login through "Login with Gitea" (OAuth2) |
 
-## Fichiers
+## Files
 
-- `docker-compose.yml` — définition des 3 services (`gitea`, `woodpecker-server`, `woodpecker-agent`)
-- `.env` — secrets et paramètres (jamais commité, voir `.env.example`)
+- `docker-compose.yml` — definition of the 3 services (`gitea`, `woodpecker-server`, `woodpecker-agent`)
+- `deploy.sh` — Infisical authentication + `docker compose up -d` with secrets injected
+- `.env` — non-secret settings (never committed, see `.env.example`)
+- `.infisical-identity.env` — Machine Identity Client ID/Secret (never committed, see `.infisical-identity.env.example`)
 
-## Variables d'environnement (voir `.env.example`)
+## Environment variables
+
+### In `.env` (non-secret, see `.env.example`)
 
 | Variable | Usage |
 |---|---|
-| `CI_NET_SUBNET` / `CI_NET_GATEWAY` | sous-réseau Docker dédié à Gitea/Woodpecker et sa passerelle |
-| `GITEA_DOMAIN` / `WOODPECKER_DOMAIN` | domaines internes utilisés par Traefik et résolus côté client |
-| `WOODPECKER_ADMIN_USER` | username Gitea qui doit avoir les droits admin sur Woodpecker |
-| `GITEA_DB_PASS` | mot de passe Postgres du user `gitea_app` |
-| `WOODPECKER_DB_PASS` | mot de passe Postgres du user `woodpecker_app` (généré en hex, jamais base64 — un `/` casse le parsing DSN `postgres://user:pass@host/db`) |
-| `WOODPECKER_AGENT_SECRET` | secret partagé gRPC serveur↔agent. **Attention** : mappé sur `WOODPECKER_GRPC_SECRET` côté serveur et `WOODPECKER_AGENT_SECRET` côté agent dans le compose — deux noms différents pour la même valeur (piège de la v3.18.0, voir plus bas) |
-| `WOODPECKER_GITEA_CLIENT` / `WOODPECKER_GITEA_SECRET` | credentials de l'app OAuth2 "Woodpecker CI" créée dans Gitea (voir étape 7 de l'installation) |
+| `CI_NET_SUBNET` / `CI_NET_GATEWAY` | Docker subnet dedicated to Gitea/Woodpecker and its gateway |
+| `GITEA_DOMAIN` / `WOODPECKER_DOMAIN` | internal domains used by Traefik and resolved on the client side |
+| `WOODPECKER_ADMIN_USER` | Gitea username that must have admin rights on Woodpecker |
 
-## Dépannage / pièges rencontrés
+### In Infisical ("Shared Keys" project, `prod` environment)
 
-1. **ufw bloque silencieusement les nouveaux sous-réseaux Docker.** Toute connexion sortante d'un conteneur `ci-net` vers un port de l'hôte (Postgres 5432, Traefik 8000) nécessite une règle explicite (voir étape 3 de l'installation). Sans ça : timeout silencieux, pas de rejet explicite — piège à diagnostiquer avec `docker exec <conteneur> wget -T 3 -O- http://<host>:<port>` (timeout pile à `-T` = bloqué réseau ; erreur quasi instantanée = port joignable). Note : les images Woodpecker sont "distroless", sans `wget`/`sh` — ce test ne marche que sur des conteneurs avec un shell (ex. Gitea).
+| Variable | Usage |
+|---|---|
+| `GITEA_DB_PASS` | Postgres password of the `gitea_app` user |
+| `WOODPECKER_DB_PASS` | Postgres password of the `woodpecker_app` user (generated as hex, never base64 — a `/` breaks the `postgres://user:pass@host/db` DSN parsing) |
+| `WOODPECKER_AGENT_SECRET` | shared gRPC secret server↔agent. **Careful**: mapped to `WOODPECKER_GRPC_SECRET` on the server and `WOODPECKER_AGENT_SECRET` on the agent in the compose — two different names for the same value (v3.18.0 pitfall, see below) |
+| `WOODPECKER_GITEA_CLIENT` / `WOODPECKER_GITEA_SECRET` | credentials of the "Woodpecker CI" OAuth2 app created in Gitea (see installation step 7) |
 
-2. **`extra_hosts: host.docker.internal:host-gateway` ne fonctionne pas sur un réseau custom.** Le mapping magique `host-gateway` résout toujours vers la passerelle du bridge Docker par défaut (`172.17.0.1`), jamais vers celle d'un réseau custom. Il faut hardcoder l'IP de la passerelle réelle (`CI_NET_GATEWAY`).
+## Security
 
-3. **`WOODPECKER_GITEA_URL` sert à la fois côté serveur ET côté navigateur client.** Ne jamais y mettre un nom de service Docker interne (`http://gitea:3000`) : ça casse la redirection OAuth "Login with Gitea" côté navigateur, qui ne peut pas résoudre ce nom. Utiliser le domaine interne résolu côté client, et ajouter un `extra_hosts` sur `woodpecker-server` pour qu'il le résolve aussi lui-même.
+- `WOODPECKER_OPEN=true`: any Gitea account can log in to Woodpecker. Acceptable on a private network; revisit if other users get a Gitea account.
+- The agent mounts the host's Docker socket (`/var/run/docker.sock`, read-write): a pipeline can control Docker on the host. Only run trusted repositories.
+- Secrets live only in Infisical; never commit `.env` or `.infisical-identity.env`.
 
-4. **Le secret gRPC partagé a un nom de variable différent selon le service** (Woodpecker v3.18.0) :
-   - Serveur : `WOODPECKER_GRPC_SECRET`
-   - Agent : `WOODPECKER_AGENT_SECRET`
-   Même valeur, deux noms différents. Un mismatch donne soit `signature is invalid` (mauvaise valeur) soit `please provide a token` (variable pas reconnue par le binaire). En cas de doute sur les vraies variables acceptées, se fier à `docker exec <conteneur> <binaire> --help` plutôt qu'à la doc en ligne (qui peut décrire une version différente).
+## Troubleshooting / pitfalls met
 
-5. **Deux mécanismes d'agents distincts dans l'UI Woodpecker**, à ne pas confondre :
-   - *Agent système* (secret partagé `WOODPECKER_GRPC_SECRET`/`WOODPECKER_AGENT_SECRET`) : auto-enregistrement au premier contact, visible uniquement dans **Admin → Agents**.
-   - *Agent Token* (bouton "Ajouter un agent" dans Paramètres du compte utilisateur) : token unique généré manuellement, visible dans **Paramètres du compte → Agents**. Mécanisme différent, non utilisé dans ce déploiement.
+1. **ufw silently blocks new Docker subnets.** Any outgoing connection from a `ci-net` container to a host port (Postgres 5432, Traefik 8000) needs an explicit rule (see installation step 3). Without it: silent timeout, no explicit rejection — diagnose with `docker exec <container> wget -T 3 -O- http://<host>:<port>` (timeout exactly at `-T` = network blocked; near-instant error = port reachable). Note: the Woodpecker images are "distroless", with no `wget`/`sh` — this test only works on containers that have a shell (e.g. Gitea).
 
-6. **Être admin Gitea ne rend pas automatiquement admin Woodpecker.** Il faut `WOODPECKER_ADMIN_USER` correctement renseigné côté serveur, puis redémarrer le conteneur et se déconnecter/reconnecter (le statut admin est vérifié au login, pas en temps réel) pour voir apparaître le menu Admin.
+2. **`extra_hosts: host.docker.internal:host-gateway` doesn't work on a custom network.** The magic `host-gateway` mapping always resolves to the default Docker bridge gateway (`172.17.0.1`), never to a custom network's. The real gateway IP must be hardcoded (`CI_NET_GATEWAY`).
 
-## Statut
+3. **`WOODPECKER_GITEA_URL` is used by both the server AND the client browser.** Never put an internal Docker service name in it (`http://gitea:3000`): it breaks the "Login with Gitea" OAuth redirect on the browser side, which can't resolve that name. Use the internal domain resolved on the client side, and add an `extra_hosts` on `woodpecker-server` so it resolves it too.
 
-✅ Déploiement complet et fonctionnel : Gitea et Woodpecker opérationnels, agents connectés, OAuth login validé.
+4. **The shared gRPC secret has a different variable name depending on the service** (Woodpecker v3.18.0):
+   - Server: `WOODPECKER_GRPC_SECRET`
+   - Agent: `WOODPECKER_AGENT_SECRET`
+   Same value, two different names. A mismatch gives either `signature is invalid` (wrong value) or `please provide a token` (variable not recognized by the binary). When in doubt about the variables really accepted, rely on `docker exec <container> <binary> --help` rather than the online docs (which may describe a different version).
 
-⬜ Reste à valider : exécution réelle d'un premier pipeline (créer un dépôt de test sur Gitea, l'activer côté Woodpecker, pousser un `.woodpecker.yml`).
+5. **Two distinct agent mechanisms in the Woodpecker UI**, not to be confused:
+   - *System agent* (shared secret `WOODPECKER_GRPC_SECRET`/`WOODPECKER_AGENT_SECRET`): self-registers on first contact, only visible in **Admin → Agents**.
+   - *Agent Token* ("Add agent" button in the user account settings): a single token generated by hand, visible in **Account settings → Agents**. Different mechanism, not used in this deployment.
 
-## Commandes utiles
+6. **Being a Gitea admin doesn't automatically make you a Woodpecker admin.** `WOODPECKER_ADMIN_USER` must be set correctly on the server, then restart the container and log out/in (admin status is checked at login, not in real time) for the Admin menu to appear.
+
+## Status
+
+✅ Full deployment working: Gitea and Woodpecker operational, agents connected, OAuth login validated.
+
+⬜ Still to validate: a real first pipeline run (create a test repository on Gitea, activate it on Woodpecker, push a `.woodpecker.yml`).
+
+## Useful commands
 
 ```bash
-# Redéployer après modif du compose ou du .env
-docker compose up -d
+# Redeploy after changing the compose or .env (secrets injected from Infisical)
+./deploy.sh
 
-# Forcer la recréation d'un service précis
+# Force the recreation of a specific service (same principle: through infisical run, see deploy.sh)
 docker compose up -d --force-recreate <service>
 
 # Logs
@@ -201,10 +233,18 @@ docker logs gitea --tail 50
 docker logs woodpecker-server --tail 50
 docker logs woodpecker-agent --tail 50
 
-# Vérifier qu'une variable d'env est bien passée à un conteneur
-docker exec <conteneur> env | grep <VAR>
+# Check that an environment variable is correctly passed to a container
+docker exec <container> env | grep <VAR>
 ```
 
-## Licence
+## Related projects
 
-MIT — voir [LICENSE](./LICENSE).
+| Repository | Role |
+| --- | --- |
+| [traefik-homelab](https://github.com/Alithiel31/traefik-homelab) | Reverse proxy |
+| [infisical-homelab](https://github.com/Alithiel31/infisical-homelab) | Secrets manager |
+| [plantuml-traefik](https://github.com/Alithiel31/plantuml-traefik) | PlantUML server |
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
