@@ -1,0 +1,10 @@
+{
+  "config": {
+    "default": true,
+    // Tables et paragraphes longs : pas de limite de longueur de ligne
+    "MD013": false,
+    // Les README EN/FR ont des sections aux titres identiques par design
+    "MD024": { "siblings_only": true }
+  },
+  "ignores": ["node_modules"]
+}
