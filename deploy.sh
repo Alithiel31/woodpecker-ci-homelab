@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Usage : ./deploy.sh [options/services docker compose up]
+#   ./deploy.sh                       -> toute la stack
+#   ./deploy.sh gitea                 -> Gitea seul (installation initiale)
+#   ./deploy.sh --force-recreate <s>  -> recréer un service
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,10 +18,10 @@ fi
 source "$IDENTITY_FILE"
 
 INFISICAL_DOMAIN="${INFISICAL_API_URL:?INFISICAL_API_URL manquant dans .infisical-identity.env}"
-INFISICAL_PROJECT_ID="db436bc3-c41c-4439-a385-1a547f7c4846"
+INFISICAL_PROJECT_ID="${INFISICAL_PROJECT_ID:?INFISICAL_PROJECT_ID manquant dans .infisical-identity.env}"
 INFISICAL_ENVIRONMENT="prod"
 
-echo "Authentification aupres d'Infisical..."
+echo "Authentification auprès d'Infisical..."
 INFISICAL_TOKEN=$(infisical login \
   --method=universal-auth \
   --client-id="$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" \
@@ -25,13 +29,13 @@ INFISICAL_TOKEN=$(infisical login \
   --domain="$INFISICAL_DOMAIN" \
   --silent --plain)
 
-echo "Deploiement (secrets injectes depuis Infisical, environnement: $INFISICAL_ENVIRONMENT)..."
+echo "Déploiement (secrets injectés depuis Infisical, environnement: $INFISICAL_ENVIRONMENT)..."
 cd "$SCRIPT_DIR"
 infisical run \
   --token="$INFISICAL_TOKEN" \
   --domain="$INFISICAL_DOMAIN" \
   --projectId="$INFISICAL_PROJECT_ID" \
   --env="$INFISICAL_ENVIRONMENT" \
-  -- docker compose up -d
+  -- docker compose up -d "$@"
 
-echo "Termine."
+echo "Terminé."

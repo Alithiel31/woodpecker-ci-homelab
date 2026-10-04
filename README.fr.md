@@ -115,13 +115,13 @@ Renseigne les valeurs (voir [Variables d'environnement](#variables-denvironnemen
 ```bash
 cp .infisical-identity.env.example .infisical-identity.env
 ```
-et renseigne le Client ID, le Client Secret et `INFISICAL_API_URL`. Ce fichier n'est jamais commité.
+et renseigne le Client ID, le Client Secret, l'ID du projet (`INFISICAL_PROJECT_ID`) et `INFISICAL_API_URL`. Ce fichier n'est jamais commité.
 
 ### 6. Démarrer Gitea seul, puis créer le compte admin
 
-`deploy.sh` lance toute la stack et n'accepte pas d'argument. Pour ne démarrer que Gitea, reprends sa commande `infisical run … -- docker compose up -d gitea` (mêmes options que dans `deploy.sh`) :
+`deploy.sh` transmet ses arguments à `docker compose up -d`. Pour ne démarrer que Gitea :
 ```bash
-docker compose up -d gitea   # via infisical run, comme dans deploy.sh
+./deploy.sh gitea
 ```
 Comme `GITEA__security__INSTALL_LOCK=true` est déjà positionné, l'installeur web est court-circuité. Crée le compte admin directement en CLI :
 ```bash
@@ -165,7 +165,7 @@ Connecte-toi sur `http://<WOODPECKER_DOMAIN>:8000/` avec "Login with Gitea", pui
 ## Fichiers
 
 - `docker-compose.yml` — définition des 3 services (`gitea`, `woodpecker-server`, `woodpecker-agent`)
-- `deploy.sh` — authentification Infisical + `docker compose up -d` avec les secrets injectés
+- `deploy.sh` — authentification Infisical + `docker compose up -d [args]` avec les secrets injectés (ex. `./deploy.sh gitea`)
 - `.env` — paramètres non secrets (jamais commité, voir `.env.example`)
 - `.infisical-identity.env` — Client ID/Secret de la Machine Identity (jamais commité, voir `.infisical-identity.env.example`)
 
@@ -225,8 +225,8 @@ Connecte-toi sur `http://<WOODPECKER_DOMAIN>:8000/` avec "Login with Gitea", pui
 # Redéployer après modif du compose ou du .env (secrets injectés depuis Infisical)
 ./deploy.sh
 
-# Forcer la recréation d'un service précis (même principe : via infisical run, voir deploy.sh)
-docker compose up -d --force-recreate <service>
+# Forcer la recréation d'un service précis
+./deploy.sh --force-recreate <service>
 
 # Logs
 docker logs gitea --tail 50

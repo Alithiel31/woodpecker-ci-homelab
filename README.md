@@ -115,13 +115,13 @@ Fill in the values (see [Environment variables](#environment-variables)).
 ```bash
 cp .infisical-identity.env.example .infisical-identity.env
 ```
-and fill in the Client ID, Client Secret and `INFISICAL_API_URL`. This file is never committed.
+and fill in the Client ID, Client Secret, project ID (`INFISICAL_PROJECT_ID`) and `INFISICAL_API_URL`. This file is never committed.
 
 ### 6. Start Gitea alone, then create the admin account
 
-`deploy.sh` starts the whole stack and takes no argument. To start Gitea only, reuse its command `infisical run … -- docker compose up -d gitea` (same options as in `deploy.sh`):
+`deploy.sh` forwards its arguments to `docker compose up -d`. To start Gitea only:
 ```bash
-docker compose up -d gitea   # through infisical run, as in deploy.sh
+./deploy.sh gitea
 ```
 Since `GITEA__security__INSTALL_LOCK=true` is already set, the web installer is bypassed. Create the admin account directly from the CLI:
 ```bash
@@ -165,7 +165,7 @@ Log in at `http://<WOODPECKER_DOMAIN>:8000/` with "Login with Gitea", then go to
 ## Files
 
 - `docker-compose.yml` — definition of the 3 services (`gitea`, `woodpecker-server`, `woodpecker-agent`)
-- `deploy.sh` — Infisical authentication + `docker compose up -d` with secrets injected
+- `deploy.sh` — Infisical authentication + `docker compose up -d [args]` with secrets injected (e.g. `./deploy.sh gitea`)
 - `.env` — non-secret settings (never committed, see `.env.example`)
 - `.infisical-identity.env` — Machine Identity Client ID/Secret (never committed, see `.infisical-identity.env.example`)
 
@@ -225,8 +225,8 @@ Log in at `http://<WOODPECKER_DOMAIN>:8000/` with "Login with Gitea", then go to
 # Redeploy after changing the compose or .env (secrets injected from Infisical)
 ./deploy.sh
 
-# Force the recreation of a specific service (same principle: through infisical run, see deploy.sh)
-docker compose up -d --force-recreate <service>
+# Force the recreation of a specific service
+./deploy.sh --force-recreate <service>
 
 # Logs
 docker logs gitea --tail 50
