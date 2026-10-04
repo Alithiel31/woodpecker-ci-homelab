@@ -13,7 +13,7 @@ fi
 # shellcheck disable=SC1090
 source "$IDENTITY_FILE"
 
-INFISICAL_DOMAIN="http://caesura.tailb8daf5.ts.net:8090/api"
+INFISICAL_DOMAIN="${INFISICAL_API_URL:?INFISICAL_API_URL manquant dans .infisical-identity.env}"
 INFISICAL_PROJECT_ID="db436bc3-c41c-4439-a385-1a547f7c4846"
 INFISICAL_ENVIRONMENT="prod"
 
