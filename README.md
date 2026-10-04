@@ -6,7 +6,7 @@ Self-hosted CI/CD stack on a homelab (Raspberry Pi 5), with no public exposure a
 
 ## Architecture
 
-```
+```text
 Browser (client on the mesh VPN)
         │  resolves gitea.homelab.internal / woodpecker.homelab.internal
         │  through a local hosts entry → homelab VPN IP
@@ -56,14 +56,17 @@ Before starting this stack, the homelab must already have:
 ### 1. Choose the dedicated Docker subnet
 
 Check that no existing Docker network on the host conflicts with the future `ci-net`:
+
 ```bash
 docker network ls -q | xargs -I{} docker network inspect {} --format '{{.Name}}: {{range .IPAM.Config}}{{.Subnet}}{{end}}'
 ```
+
 Adjust `CI_NET_SUBNET`/`CI_NET_GATEWAY` in `.env` if `172.16.0.0/24` is already taken.
 
 ### 2. Create the Postgres databases and users
 
 On the host, as the Postgres admin user:
+
 ```sql
 CREATE USER gitea_app WITH PASSWORD 'a-strong-password';
 CREATE DATABASE gitea OWNER gitea_app;
@@ -71,62 +74,78 @@ CREATE DATABASE gitea OWNER gitea_app;
 CREATE USER woodpecker_app WITH PASSWORD 'another-strong-password';
 CREATE DATABASE woodpecker OWNER woodpecker_app;
 ```
+
 ⚠️ For `WOODPECKER_DB_PASS`, generate the password with `openssl rand -hex 24` (hexadecimal only) rather than `base64`: Woodpecker uses it in a DSN URL (`postgres://user:pass@host/db`) and a special character such as `/` breaks the parsing.
 
 Add the access rule to `pg_hba.conf` (adjust the path to your Postgres version):
-```
+
+```text
 host    gitea        gitea_app        <CI_NET_SUBNET>    scram-sha-256
 host    woodpecker   woodpecker_app   <CI_NET_SUBNET>    scram-sha-256
 ```
+
 Then reload Postgres (`sudo systemctl reload postgresql` or equivalent).
 
 ### 3. Open the required firewall ports
 
 The `ci-net` network must be able to reach Postgres (5432) and Traefik (8000) on the host:
+
 ```bash
 sudo ufw allow from <CI_NET_SUBNET> to any port 5432 proto tcp comment "gitea+woodpecker -> shared postgres"
 sudo ufw allow from <CI_NET_SUBNET> to any port 8000 proto tcp comment "gitea+woodpecker -> traefik"
 ```
+
 Without these rules: silent timeout (no explicit rejection) at startup — see the Troubleshooting section below.
 
 ### 4. Configure internal DNS on the client side
 
 Add to the hosts file of every client machine that needs access (`C:\Windows\System32\drivers\etc\hosts` on Windows, `/etc/hosts` on Linux/macOS):
-```
+
+```text
 <HOMELAB_VPN_IP>  gitea.homelab.internal
 <HOMELAB_VPN_IP>  woodpecker.homelab.internal
 ```
+
 (replace with the domains actually chosen in `.env` if different)
 
 ### 5. Prepare configuration and secrets
 
 **Non-secret settings** (`.env`):
+
 ```bash
 cp .env.example .env
 ```
+
 Fill in the values (see [Environment variables](#environment-variables)).
 
 **Secrets** (Infisical, "Shared Keys" project, `prod` environment): create these entries. For `WOODPECKER_GITEA_CLIENT`/`WOODPECKER_GITEA_SECRET`, the Gitea OAuth2 app doesn't exist yet: they will be added in step 7.
+
 - `GITEA_DB_PASS`
 - `WOODPECKER_DB_PASS`
 - `WOODPECKER_AGENT_SECRET` (e.g. `openssl rand -hex 32`)
 
 **`deploy.sh` access to Infisical**: create a Machine Identity `woodpecker-ci-deploy` (Universal Auth, read access to the project), then:
+
 ```bash
 cp .infisical-identity.env.example .infisical-identity.env
 ```
+
 and fill in the Client ID, Client Secret, project ID (`INFISICAL_PROJECT_ID`) and `INFISICAL_API_URL`. This file is never committed.
 
 ### 6. Start Gitea alone, then create the admin account
 
 `deploy.sh` forwards its arguments to `docker compose up -d`. To start Gitea only:
+
 ```bash
 ./deploy.sh gitea
 ```
+
 Since `GITEA__security__INSTALL_LOCK=true` is already set, the web installer is bypassed. Create the admin account directly from the CLI:
+
 ```bash
 docker exec -u git gitea gitea admin user create --username <user> --password "<pass>" --email <email> --admin
 ```
+
 (`-u git` is mandatory — the Gitea process runs as `git`, not `root`.)
 
 Then log in at `http://<GITEA_DOMAIN>:8000/` with this account.
@@ -134,6 +153,7 @@ Then log in at `http://<GITEA_DOMAIN>:8000/` with this account.
 ### 7. Create the OAuth2 application in Gitea for Woodpecker
 
 In Gitea: **Site Administration → Applications → Manage OAuth2 Applications → Create OAuth2 Application**.
+
 - Name: `Woodpecker CI` (or anything)
 - Redirect URI: `http://<WOODPECKER_DOMAIN>:8000/authorize`
 
@@ -144,11 +164,14 @@ Copy the generated **Client ID** and **Client Secret** into Infisical ("Shared K
 ```bash
 ./deploy.sh
 ```
+
 The script authenticates to Infisical with the Machine Identity, then runs `docker compose up -d` with the secrets injected. Check the logs:
+
 ```bash
 docker logs woodpecker-server --tail 30
 docker logs woodpecker-agent --tail 30
 ```
+
 The server must **not** print `WOODPECKER_GRPC_SECRET is not set` (otherwise `WOODPECKER_AGENT_SECRET` wasn't picked up correctly). The agent must print `polling new workflow` with no `fatal` error.
 
 ### 9. Check that the agent is connected
