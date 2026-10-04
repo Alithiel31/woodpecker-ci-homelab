@@ -2,29 +2,47 @@
 
 [English version](README.md)
 
+[![Lint Markdown](https://github.com/Alithiel31/woodpecker-ci-homelab/actions/workflows/lint-markdown.yml/badge.svg?branch=main)](https://github.com/Alithiel31/woodpecker-ci-homelab/actions/workflows/lint-markdown.yml) [![License: MIT](https://img.shields.io/github/license/Alithiel31/woodpecker-ci-homelab)](LICENSE) ![Raspberry Pi 5](https://img.shields.io/badge/Raspberry%20Pi-5-C51A4A?logo=raspberrypi&logoColor=white) ![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white) [![Woodpecker CI](https://img.shields.io/badge/Woodpecker-CI-4CAF50?logo=woodpeckerci&logoColor=white)](https://woodpecker-ci.org/) [![Gitea](https://img.shields.io/badge/Gitea-1.22-609926?logo=gitea&logoColor=white)](https://about.gitea.com/)
+
 Stack CI/CD auto-hébergée sur un homelab (Raspberry Pi 5), sans aucune exposition publique. Accès exclusivement via un VPN mesh (Tailscale ou équivalent) + résolution DNS locale côté client. Les secrets sont gérés dans [Infisical](https://github.com/Alithiel31/infisical-homelab) et injectés au déploiement.
 
 ## Architecture
 
-```text
-Navigateur (client sur le VPN mesh)
-        │  résout gitea.homelab.internal / woodpecker.homelab.internal
-        │  via une entrée dans le fichier hosts local → IP VPN du homelab
-        ▼
-   Traefik (reverse proxy déjà en place, entrypoint "web", port host 8000)
-        │  routage par Host() header, réseau traefik-net
-        ▼
-   ┌─────────────┐         ┌────────────────────┐
-   │    Gitea    │◄───────►│  Woodpecker Server  │
-   │ (forge git) │  OAuth2 │  (orchestrateur CI) │
-   └──────┬──────┘         └──────────┬──────────┘
-          │                           │ gRPC (port 9000)
-          │ Postgres natif            ▼
-          │ (172.16.0.1:5432)  ┌──────────────────┐
-          └───────────────────►│ Woodpecker Agent  │
-                                │ (exécute les      │
-                                │  pipelines Docker)│
-                                └──────────────────┘
+Place de ce projet dans le homelab (en surbrillance) :
+
+```mermaid
+flowchart LR
+    client(["Client<br/>(Tailscale VPN)"])
+    internet(["Internet"])
+    cf["Cloudflare Tunnel<br/>(optional, public services)"]
+    subgraph pi ["Raspberry Pi 5 — Docker"]
+        traefik["Traefik :8000"]
+        subgraph ci ["ci-net"]
+            gitea["Gitea"]
+            wps["Woodpecker Server"]
+            wpa["Woodpecker Agent"]
+        end
+        plantuml["PlantUML"]
+        subgraph vault ["Infisical stack"]
+            infisical["Infisical :8090"]
+            redis[("Redis")]
+            mailpit["Mailpit"]
+        end
+    end
+    pg[("PostgreSQL<br/>native, shared")]
+
+    client -->|"hosts file"| traefik
+    internet -.-> cf -.-> traefik
+    traefik --> gitea & wps & plantuml
+    gitea <-->|OAuth2| wps
+    wps -->|"gRPC :9000"| wpa
+    gitea & wps & infisical --> pg
+    infisical --> redis & mailpit
+    client -->|"Tailscale"| infisical
+    infisical -.->|"secrets at deploy time"| ci
+
+    classDef current fill:#fff3b0,stroke:#d97706,stroke-width:3px,color:#000
+    class gitea,wps,wpa current
 ```
 
 - **Gitea** : forge Git auto-hébergée, remplace GitHub pour garder toute la chaîne (webhooks inclus) strictement interne.
@@ -35,6 +53,13 @@ Navigateur (client sur le VPN mesh)
 - **Infisical** ([infisical-homelab](https://github.com/Alithiel31/infisical-homelab)) : fournit les secrets (mots de passe DB, secret gRPC, credentials OAuth2) injectés par `deploy.sh` ; plus aucun secret dans `.env`.
 
 Réseau Docker dédié `ci-net` (`172.16.0.0/24` par défaut, configurable via `.env`), séparé de `traefik-net`.
+
+## Choix de conception
+
+- Forge et CI auto-hébergées : toute la chaîne, webhooks inclus, reste sur le réseau privé.
+- Woodpecker est léger et tourne sur ARM, ce qui convient à un Raspberry Pi.
+- Un sous-réseau `ci-net` dédié sépare la stack CI de `traefik-net`.
+- Les secrets ne sont jamais stockés à côté du code : ils viennent d'Infisical au déploiement.
 
 ## Prérequis
 

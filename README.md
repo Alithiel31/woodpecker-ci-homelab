@@ -2,29 +2,47 @@
 
 [Version française](README.fr.md)
 
+[![Lint Markdown](https://github.com/Alithiel31/woodpecker-ci-homelab/actions/workflows/lint-markdown.yml/badge.svg?branch=main)](https://github.com/Alithiel31/woodpecker-ci-homelab/actions/workflows/lint-markdown.yml) [![License: MIT](https://img.shields.io/github/license/Alithiel31/woodpecker-ci-homelab)](LICENSE) ![Raspberry Pi 5](https://img.shields.io/badge/Raspberry%20Pi-5-C51A4A?logo=raspberrypi&logoColor=white) ![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white) [![Woodpecker CI](https://img.shields.io/badge/Woodpecker-CI-4CAF50?logo=woodpeckerci&logoColor=white)](https://woodpecker-ci.org/) [![Gitea](https://img.shields.io/badge/Gitea-1.22-609926?logo=gitea&logoColor=white)](https://about.gitea.com/)
+
 Self-hosted CI/CD stack on a homelab (Raspberry Pi 5), with no public exposure at all. Access is only through a mesh VPN (Tailscale or equivalent) plus local DNS resolution on the client. Secrets are managed in [Infisical](https://github.com/Alithiel31/infisical-homelab) and injected at deploy time.
 
 ## Architecture
 
-```text
-Browser (client on the mesh VPN)
-        │  resolves gitea.homelab.internal / woodpecker.homelab.internal
-        │  through a local hosts entry → homelab VPN IP
-        ▼
-   Traefik (reverse proxy already in place, entrypoint "web", host port 8000)
-        │  routing by Host() header, traefik-net network
-        ▼
-   ┌─────────────┐         ┌────────────────────┐
-   │    Gitea    │◄───────►│  Woodpecker Server  │
-   │ (git forge) │  OAuth2 │  (CI orchestrator)  │
-   └──────┬──────┘         └──────────┬──────────┘
-          │                           │ gRPC (port 9000)
-          │ native Postgres           ▼
-          │ (172.16.0.1:5432)  ┌──────────────────┐
-          └───────────────────►│ Woodpecker Agent  │
-                                │ (runs the Docker  │
-                                │  pipelines)       │
-                                └──────────────────┘
+Where this project sits in the homelab (highlighted):
+
+```mermaid
+flowchart LR
+    client(["Client<br/>(Tailscale VPN)"])
+    internet(["Internet"])
+    cf["Cloudflare Tunnel<br/>(optional, public services)"]
+    subgraph pi ["Raspberry Pi 5 — Docker"]
+        traefik["Traefik :8000"]
+        subgraph ci ["ci-net"]
+            gitea["Gitea"]
+            wps["Woodpecker Server"]
+            wpa["Woodpecker Agent"]
+        end
+        plantuml["PlantUML"]
+        subgraph vault ["Infisical stack"]
+            infisical["Infisical :8090"]
+            redis[("Redis")]
+            mailpit["Mailpit"]
+        end
+    end
+    pg[("PostgreSQL<br/>native, shared")]
+
+    client -->|"hosts file"| traefik
+    internet -.-> cf -.-> traefik
+    traefik --> gitea & wps & plantuml
+    gitea <-->|OAuth2| wps
+    wps -->|"gRPC :9000"| wpa
+    gitea & wps & infisical --> pg
+    infisical --> redis & mailpit
+    client -->|"Tailscale"| infisical
+    infisical -.->|"secrets at deploy time"| ci
+
+    classDef current fill:#fff3b0,stroke:#d97706,stroke-width:3px,color:#000
+    class gitea,wps,wpa current
 ```
 
 - **Gitea**: self-hosted Git forge, replaces GitHub so the whole chain (webhooks included) stays strictly internal.
@@ -35,6 +53,13 @@ Browser (client on the mesh VPN)
 - **Infisical** ([infisical-homelab](https://github.com/Alithiel31/infisical-homelab)): provides the secrets (DB passwords, gRPC secret, OAuth2 credentials) injected by `deploy.sh`; no secret lives in `.env` anymore.
 
 Dedicated Docker network `ci-net` (`172.16.0.0/24` by default, configurable via `.env`), separate from `traefik-net`.
+
+## Design choices
+
+- Self-hosted forge and CI so the whole chain, webhooks included, stays on the private network.
+- Woodpecker is lightweight and runs on ARM, which suits a Raspberry Pi.
+- A dedicated `ci-net` subnet keeps the CI stack separate from `traefik-net`.
+- Secrets are never stored next to the code: they come from Infisical at deploy time.
 
 ## Prerequisites
 
