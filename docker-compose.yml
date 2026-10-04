@@ -38,6 +38,7 @@ services:
       - "host.docker.internal:${CI_NET_GATEWAY}"
     restart: unless-stopped
     labels:
+      - "homelab.tier=infra"
       - "traefik.enable=true"
       - "traefik.http.routers.gitea.entrypoints=web"
       - "traefik.http.routers.gitea.rule=Host(`${GITEA_DOMAIN}`)"
@@ -67,6 +68,7 @@ services:
       - "${GITEA_DOMAIN}:${CI_NET_GATEWAY}"
     restart: unless-stopped
     labels:
+      - "homelab.tier=infra"
       - "traefik.enable=true"
       - "traefik.http.routers.woodpecker.entrypoints=web"
       - "traefik.http.routers.woodpecker.rule=Host(`${WOODPECKER_DOMAIN}`)"
@@ -75,6 +77,8 @@ services:
   woodpecker-agent:
     image: woodpeckerci/woodpecker-agent:v3
     container_name: woodpecker-agent
+    labels:
+      - "homelab.tier=infra"
     command: agent
     environment:
       - WOODPECKER_SERVER=woodpecker-server:9000
