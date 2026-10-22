@@ -27,6 +27,12 @@ services:
       - GITEA__server__ROOT_URL=http://${GITEA_DOMAIN}:8000/
       - GITEA__server__HTTP_PORT=3000
       - GITEA__security__INSTALL_LOCK=true
+      # Mail (reset de mot de passe…) : Mailpit mutualisé (projet mailpit/), puits SMTP sans auth ni TLS
+      - GITEA__mailer__ENABLED=true
+      - GITEA__mailer__PROTOCOL=smtp
+      - GITEA__mailer__SMTP_ADDR=${SMTP_HOST:?SMTP_HOST manquant dans .env}
+      - GITEA__mailer__SMTP_PORT=${SMTP_PORT:-1025}
+      - GITEA__mailer__FROM=Gitea <gitea@caesura.local>
     volumes:
       - gitea-data:/data
       - /etc/timezone:/etc/timezone:ro
