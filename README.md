@@ -16,7 +16,7 @@ flowchart LR
     internet(["Internet"])
     cf["Cloudflare Tunnel<br/>(optional, public services)"]
     subgraph pi ["Raspberry Pi 5 — Docker"]
-        traefik["Traefik :8000"]
+        traefik["Traefik :80 / :8000"]
         subgraph ci ["ci-net"]
             gitea["Gitea"]
             wps["Woodpecker Server"]
